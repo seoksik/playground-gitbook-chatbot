@@ -1,0 +1,12 @@
+streamlit
+langchain
+langchain-openai
+langchain-community
+supabase-client
+python-dotenv
+beautifulsoup4
+tiktoken
+requests
+lxml
+xmltodict # 사이트맵 파싱에 xmltodict를 사용하기로 결정 (get_urls_from_sitemap 수정 필요) 또는 ElementTree 유지
+psycopg2-binary # Supabase Vector DB 연동에 필요할 수 있음 (Vercel 배포 시 확인)
