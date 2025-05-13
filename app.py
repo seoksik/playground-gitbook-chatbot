@@ -37,6 +37,181 @@ DEFAULT_SUGGESTED_QUESTIONS = [
     "자주 묻는 질문과 답변"
 ]
 
+# 벡터 DB 기반 초기 추천 질문 생성 함수
+def generate_initial_questions(vector_store, llm, num_questions=4):
+    try:
+        # 벡터 DB에서 대표적인 문서 검색 (임베딩 없이 최근 추가된 문서들)
+        results = vector_store.client.from_("documents").select("content, metadata").limit(5).execute()
+        
+        if not results.data or len(results.data) == 0:
+            return random.sample(DEFAULT_SUGGESTED_QUESTIONS, min(num_questions, len(DEFAULT_SUGGESTED_QUESTIONS)))
+        
+        # 검색된 문서 내용 추출
+        doc_contents = []
+        for doc in results.data:
+            content = doc.get('content', '')
+            if content and len(content) > 50:  # 충분히 의미 있는 콘텐츠만 포함
+                doc_contents.append(content[:500])  # 각 문서의 앞부분만 사용
+        
+        if not doc_contents:
+            return random.sample(DEFAULT_SUGGESTED_QUESTIONS, min(num_questions, len(DEFAULT_SUGGESTED_QUESTIONS)))
+        
+        # 문서 내용을 통합하여 LLM에 질문 생성 요청
+        combined_content = "\n\n".join(doc_contents[:3])  # 너무 길지 않게 최대 3개 문서만 사용
+        
+        prompt = f"""
+        다음은 문서 시스템에 저장된 콘텐츠의 일부입니다:
+        {combined_content}
+
+        위 문서 내용을 바탕으로, 사용자가 물어볼 만한 의미 있는 질문 {num_questions}개를 생성해주세요.
+        이 질문들은 문서 시스템이 실제로 답변할 수 있는 내용이어야 합니다.
+        짧고 명확한 질문으로 작성하세요.
+        JSON 형식 없이 질문만 줄바꿈으로 구분하여 반환하세요.
+        """
+        
+        # LLM으로 질문 생성
+        response = llm.invoke(prompt)
+        questions = response.content.strip().split('\n')
+        
+        # 빈 줄 제거하고 앞뒤 공백 제거
+        questions = [q.strip() for q in questions if q.strip()]
+        
+        # 중복 제거 및 최대 개수 제한
+        unique_questions = []
+        for q in questions:
+            if q not in unique_questions:
+                unique_questions.append(q)
+                if len(unique_questions) >= num_questions:
+                    break
+        
+        # 질문이 충분하지 않으면 기본 질문으로 보충
+        if len(unique_questions) < num_questions:
+            remaining = num_questions - len(unique_questions)
+            default_samples = random.sample(DEFAULT_SUGGESTED_QUESTIONS, min(remaining, len(DEFAULT_SUGGESTED_QUESTIONS)))
+            unique_questions.extend(default_samples)
+        
+        return unique_questions[:num_questions]
+    except Exception as e:
+        print(f"초기 추천 질문 생성 오류: {e}")
+        return random.sample(DEFAULT_SUGGESTED_QUESTIONS, min(num_questions, len(DEFAULT_SUGGESTED_QUESTIONS)))
+
+# 벡터 DB에서 임베딩 검색을 통한 고급 추천 질문 생성 함수
+def generate_advanced_initial_questions(vector_store, embeddings, llm, num_questions=4):
+    try:
+        # 주요 주제어 리스트 - 문서에 적합한 일반적인 키워드
+        topic_keywords = [
+            "개요", "설치", "시작하기", "기능", "사용법", "FAQ", 
+            "주요 기능", "가이드", "튜토리얼", "API"
+        ]
+        
+        # 각 주제어에 대한 임베딩 생성 후 관련 문서 검색
+        all_docs = []
+        
+        # 주제어 기반 검색
+        for keyword in topic_keywords[:5]:  # 처리 시간 단축을 위해 상위 5개만 사용
+            try:
+                # 키워드 임베딩 생성
+                query_embedding = embeddings.embed_query(keyword)
+                
+                # 쿼리 벡터와 유사한 문서 검색
+                function_params = {
+                    "query_embedding": query_embedding,
+                    "match_threshold": 0.5,
+                    "match_count": 2  # 각 키워드당 최대 2개 문서
+                }
+                
+                results = vector_store.client.rpc(
+                    "match_documents", function_params
+                ).execute()
+                
+                # 결과 추가
+                if results.data:
+                    for doc in results.data:
+                        if doc.get('content') and len(doc.get('content')) > 100:
+                            all_docs.append(doc)
+            except Exception as e:
+                print(f"키워드 '{keyword}' 검색 오류: {e}")
+                continue
+        
+        # 추가 검색: 최신 문서도 포함
+        try:
+            recent_docs = vector_store.client.from_("documents").select("content, metadata").order("id", desc=True).limit(3).execute()
+            if recent_docs.data:
+                all_docs.extend(recent_docs.data)
+        except Exception as e:
+            print(f"최신 문서 검색 오류: {e}")
+        
+        # 문서가 없으면 기본 검색 방법 사용
+        if not all_docs:
+            return generate_initial_questions(vector_store, llm, num_questions)
+        
+        # 중복 제거 및 내용 추출
+        unique_contents = []
+        seen_contents = set()
+        
+        for doc in all_docs:
+            content = doc.get('content', '')
+            # 같은 내용이 이미 있는지 확인 (단순화를 위해 앞부분만 체크)
+            content_start = content[:100] if len(content) > 100 else content
+            
+            if content and content_start not in seen_contents:
+                seen_contents.add(content_start)
+                # 긴 문서는 앞부분만 사용
+                if len(content) > 800:
+                    content = content[:800] + "..."
+                unique_contents.append(content)
+        
+        # 최적의 결과를 위해 문서 3~5개만 사용
+        selected_contents = unique_contents[:5]
+        
+        if not selected_contents:
+            return generate_initial_questions(vector_store, llm, num_questions)
+        
+        # 문서 내용 통합
+        combined_content = "\n\n---\n\n".join(selected_contents)
+        
+        # LLM 프롬프트 작성
+        prompt = f"""
+        다음은 문서 시스템에 저장된 실제 콘텐츠의 일부입니다:
+        
+        {combined_content}
+
+        위 문서 내용을 정확히 바탕으로, 다음 조건을 충족하는 질문 {num_questions}개를 생성해주세요:
+        1. 시스템이 위 문서 내용을 기반으로 확실히 답변할 수 있는 질문만 생성하세요.
+        2. 질문은 구체적이고 명확해야 합니다.
+        3. 질문은 문서 내용에 포함된 주요 개념, 기능, 방법 등을 다루어야 합니다.
+        4. 다양한 주제를 다루도록 질문을 분산시키세요.
+        
+        JSON 형식 없이 질문만 줄바꿈으로 구분하여 반환하세요.
+        """
+        
+        # LLM으로 질문 생성
+        response = llm.invoke(prompt)
+        questions = response.content.strip().split('\n')
+        
+        # 빈 줄 제거하고 앞뒤 공백 제거
+        questions = [q.strip() for q in questions if q.strip()]
+        
+        # 중복 제거 및 최대 개수 제한
+        unique_questions = []
+        for q in questions:
+            if q not in unique_questions:
+                unique_questions.append(q)
+                if len(unique_questions) >= num_questions:
+                    break
+        
+        # 질문이 충분하지 않으면 기본 질문으로 보충
+        if len(unique_questions) < num_questions:
+            remaining = num_questions - len(unique_questions)
+            default_samples = random.sample(DEFAULT_SUGGESTED_QUESTIONS, min(remaining, len(DEFAULT_SUGGESTED_QUESTIONS)))
+            unique_questions.extend(default_samples)
+        
+        return unique_questions[:num_questions]
+    except Exception as e:
+        print(f"고급 초기 추천 질문 생성 오류: {e}")
+        # 오류 발생 시 기본 방식으로 폴백
+        return generate_initial_questions(vector_store, llm, num_questions)
+
 # 문맥별 추천 질문 생성 함수
 def generate_context_questions(last_answer, llm):
     try:
@@ -148,9 +323,11 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
     load_chat_history()
 
-# 추천 질문 초기화
+# 추천 질문 초기화 - 벡터 DB 기반으로 생성
 if "suggested_questions" not in st.session_state:
-    st.session_state.suggested_questions = random.sample(DEFAULT_SUGGESTED_QUESTIONS, min(4, len(DEFAULT_SUGGESTED_QUESTIONS)))
+    # 벡터 DB 기반 고급 추천 질문 생성
+    initial_questions = generate_advanced_initial_questions(vector_store, embeddings, qa_llm, num_questions=4)
+    st.session_state.suggested_questions = initial_questions
 
 # 대화 메모리 초기화 (세션 상태 사용)
 if "memory" not in st.session_state:
@@ -199,14 +376,16 @@ def init_langchain_components(_supabase_client, _memory):
             return_generated_question=True,
         )
             
-        return qa_chain
+        return qa_chain, vector_store, llm, embeddings
     except Exception as e:
         st.error(f"Langchain 구성 요소 초기화 실패: {e}")
-        return None
+        return None, None, None, None
 
-qa_chain = init_langchain_components(supabase_client, st.session_state.memory)
-if not qa_chain:
+qa_result = init_langchain_components(supabase_client, st.session_state.memory)
+if not qa_result or qa_result[0] is None:
     st.stop()
+
+qa_chain, vector_store, qa_llm, embeddings = qa_result
 
 # 추천 질문 처리 함수
 def handle_suggested_question(question):
@@ -248,7 +427,7 @@ def handle_suggested_question(question):
                 message_placeholder.markdown(full_response_content)
                 
                 # 맥락에 맞는 새로운 추천 질문 생성
-                context_questions = generate_context_questions(answer, llm)
+                context_questions = generate_context_questions(answer, qa_llm)
                 if context_questions:
                     st.session_state.suggested_questions = context_questions
                 else:
@@ -344,11 +523,8 @@ if st.sidebar.button("➕ 새 대화 시작", use_container_width=True):
     st.session_state.memory.clear()
     st.session_state.messages = [{"role": "assistant", "content": "안녕하세요! Gitbook 문서에 대해 무엇이든 물어보세요."}]
     
-    # 추천 질문 초기화
-    st.session_state.suggested_questions = random.sample(
-        DEFAULT_SUGGESTED_QUESTIONS, 
-        min(4, len(DEFAULT_SUGGESTED_QUESTIONS))
-    )
+    # 추천 질문 초기화 - 벡터 DB 기반 고급 추천 질문
+    st.session_state.suggested_questions = generate_advanced_initial_questions(vector_store, embeddings, qa_llm, num_questions=4)
     
     st.rerun()
 
@@ -417,7 +593,7 @@ if prompt := st.chat_input("질문을 입력해주세요..."):
                 message_placeholder.markdown(full_response_content)
                 
                 # 맥락에 맞는 새로운 추천 질문 생성
-                context_questions = generate_context_questions(answer, llm)
+                context_questions = generate_context_questions(answer, qa_llm)
                 if context_questions:
                     st.session_state.suggested_questions = context_questions
                 else:
@@ -468,11 +644,8 @@ if all_cols[0].button("모든 대화 지우기", use_container_width=True):
             os.remove(CHAT_HISTORY_FILE)
         except:
             pass
-    # 추천 질문 초기화
-    st.session_state.suggested_questions = random.sample(
-        DEFAULT_SUGGESTED_QUESTIONS, 
-        min(4, len(DEFAULT_SUGGESTED_QUESTIONS))
-    )
+    # 추천 질문 초기화 - 벡터 DB 기반 고급 추천 질문
+    st.session_state.suggested_questions = generate_advanced_initial_questions(vector_store, embeddings, qa_llm, num_questions=4)
     st.rerun()
 
 # 현재 대화 저장 버튼
