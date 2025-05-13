@@ -38,10 +38,10 @@ DEFAULT_SUGGESTED_QUESTIONS = [
 ]
 
 # 벡터 DB 기반 초기 추천 질문 생성 함수
-def generate_initial_questions(vector_store, llm, num_questions=4):
+def generate_initial_questions(vector_store, supabase_client, llm, num_questions=4):
     try:
         # 벡터 DB에서 대표적인 문서 검색 (임베딩 없이 최근 추가된 문서들)
-        results = vector_store.client.from_("documents").select("content, metadata").limit(5).execute()
+        results = supabase_client.from_("documents").select("content, metadata").limit(5).execute()
         
         if not results.data or len(results.data) == 0:
             return random.sample(DEFAULT_SUGGESTED_QUESTIONS, min(num_questions, len(DEFAULT_SUGGESTED_QUESTIONS)))
@@ -96,7 +96,7 @@ def generate_initial_questions(vector_store, llm, num_questions=4):
         return random.sample(DEFAULT_SUGGESTED_QUESTIONS, min(num_questions, len(DEFAULT_SUGGESTED_QUESTIONS)))
 
 # 벡터 DB에서 임베딩 검색을 통한 고급 추천 질문 생성 함수
-def generate_advanced_initial_questions(vector_store, embeddings, llm, num_questions=4):
+def generate_advanced_initial_questions(vector_store, embeddings, supabase_client, llm, num_questions=4):
     try:
         # 주요 주제어 리스트 - 문서에 적합한 일반적인 키워드
         topic_keywords = [
@@ -120,7 +120,7 @@ def generate_advanced_initial_questions(vector_store, embeddings, llm, num_quest
                     "match_count": 2  # 각 키워드당 최대 2개 문서
                 }
                 
-                results = vector_store.client.rpc(
+                results = supabase_client.rpc(
                     "match_documents", function_params
                 ).execute()
                 
@@ -135,7 +135,7 @@ def generate_advanced_initial_questions(vector_store, embeddings, llm, num_quest
         
         # 추가 검색: 최신 문서도 포함
         try:
-            recent_docs = vector_store.client.from_("documents").select("content, metadata").order("id", desc=True).limit(3).execute()
+            recent_docs = supabase_client.from_("documents").select("content, metadata").order("id", desc=True).limit(3).execute()
             if recent_docs.data:
                 all_docs.extend(recent_docs.data)
         except Exception as e:
@@ -143,7 +143,7 @@ def generate_advanced_initial_questions(vector_store, embeddings, llm, num_quest
         
         # 문서가 없으면 기본 검색 방법 사용
         if not all_docs:
-            return generate_initial_questions(vector_store, llm, num_questions)
+            return generate_initial_questions(vector_store, supabase_client, llm, num_questions)
         
         # 중복 제거 및 내용 추출
         unique_contents = []
@@ -165,7 +165,7 @@ def generate_advanced_initial_questions(vector_store, embeddings, llm, num_quest
         selected_contents = unique_contents[:5]
         
         if not selected_contents:
-            return generate_initial_questions(vector_store, llm, num_questions)
+            return generate_initial_questions(vector_store, supabase_client, llm, num_questions)
         
         # 문서 내용 통합
         combined_content = "\n\n---\n\n".join(selected_contents)
@@ -210,7 +210,7 @@ def generate_advanced_initial_questions(vector_store, embeddings, llm, num_quest
     except Exception as e:
         print(f"고급 초기 추천 질문 생성 오류: {e}")
         # 오류 발생 시 기본 방식으로 폴백
-        return generate_initial_questions(vector_store, llm, num_questions)
+        return generate_initial_questions(vector_store, supabase_client, llm, num_questions)
 
 # 문맥별 추천 질문 생성 함수
 def generate_context_questions(last_answer, llm):
@@ -323,12 +323,6 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
     load_chat_history()
 
-# 추천 질문 초기화 - 벡터 DB 기반으로 생성
-if "suggested_questions" not in st.session_state:
-    # 벡터 DB 기반 고급 추천 질문 생성
-    initial_questions = generate_advanced_initial_questions(vector_store, embeddings, qa_llm, num_questions=4)
-    st.session_state.suggested_questions = initial_questions
-
 # 대화 메모리 초기화 (세션 상태 사용)
 if "memory" not in st.session_state:
     st.session_state.memory = ConversationBufferMemory(
@@ -386,6 +380,92 @@ if not qa_result or qa_result[0] is None:
     st.stop()
 
 qa_chain, vector_store, qa_llm, embeddings = qa_result
+
+# 채팅 기록 초기화
+if "messages" not in st.session_state:
+    st.session_state.messages = [{"role": "assistant", "content": "안녕하세요! Gitbook 문서에 대해 무엇이든 물어보세요."}]
+
+# --- 간단한 보완 옵션: 벡터 DB 없이도 작동할 수 있도록 기본 질문 사용 --- #
+def get_default_questions(num_questions=4):
+    """벡터 DB 접근에 실패한 경우 기본 질문 반환"""
+    return random.sample(DEFAULT_SUGGESTED_QUESTIONS, min(num_questions, len(DEFAULT_SUGGESTED_QUESTIONS)))
+
+# 대체 질문 생성 함수 - 수정된 버전
+def generate_alternative_questions(supabase_client, llm, num_questions=4):
+    """데이터베이스 직접 쿼리를 통한 추천 질문 생성"""
+    try:
+        # 직접 데이터베이스에서 문서 샘플 가져오기
+        results = supabase_client.from_("documents").select("content").limit(5).execute()
+        
+        if not results.data or len(results.data) == 0:
+            print("문서가 없거나 데이터베이스 접근 실패")
+            return get_default_questions(num_questions)
+        
+        # 검색된 문서 내용 추출
+        doc_contents = []
+        for doc in results.data:
+            content = doc.get('content', '')
+            if content and len(content) > 50:
+                doc_contents.append(content[:500]) 
+        
+        if not doc_contents:
+            print("유효한 문서 콘텐츠 없음")
+            return get_default_questions(num_questions)
+        
+        # 문서 내용 결합
+        combined_content = "\n\n".join(doc_contents[:3])
+        
+        prompt = f"""
+        다음은 문서 시스템에 저장된 콘텐츠의 일부입니다:
+        {combined_content}
+
+        위 문서 내용을 바탕으로, 사용자가 물어볼 만한 의미 있는 질문 {num_questions}개를 생성해주세요.
+        이 질문들은 문서 시스템이 실제로 답변할 수 있는 내용이어야 합니다.
+        짧고 명확한 질문으로 작성하세요.
+        JSON 형식 없이 질문만 줄바꿈으로 구분하여 반환하세요.
+        """
+        
+        response = llm.invoke(prompt)
+        questions = response.content.strip().split('\n')
+        
+        # 빈 줄 제거하고 앞뒤 공백 제거
+        questions = [q.strip() for q in questions if q.strip()]
+        
+        # 중복 제거 및 최대 개수 제한
+        unique_questions = []
+        for q in questions:
+            if q not in unique_questions:
+                unique_questions.append(q)
+                if len(unique_questions) >= num_questions:
+                    break
+        
+        # 질문이 충분하지 않으면 기본 질문으로 보충
+        if len(unique_questions) < num_questions:
+            remaining = num_questions - len(unique_questions)
+            default_samples = get_default_questions(remaining)
+            unique_questions.extend(default_samples)
+        
+        return unique_questions[:num_questions]
+    except Exception as e:
+        print(f"대체 추천 질문 생성 오류: {e}")
+        return get_default_questions(num_questions)
+
+# 추천 질문 초기화 - 벡터 DB 기반으로 생성
+if "suggested_questions" not in st.session_state:
+    try:
+        # 벡터 DB 기반 고급 추천 질문 생성 시도
+        initial_questions = generate_advanced_initial_questions(vector_store, embeddings, supabase_client, qa_llm, num_questions=4)
+    except Exception as e:
+        print(f"고급 추천 질문 생성 실패: {e}")
+        try:
+            # 대체 방식 시도
+            initial_questions = generate_alternative_questions(supabase_client, qa_llm, num_questions=4)
+        except Exception as backup_e:
+            print(f"대체 추천 질문 생성도 실패: {backup_e}")
+            # 마지막 대안으로 기본 질문 사용
+            initial_questions = get_default_questions(4)
+    
+    st.session_state.suggested_questions = initial_questions
 
 # 추천 질문 처리 함수
 def handle_suggested_question(question):
@@ -524,7 +604,18 @@ if st.sidebar.button("➕ 새 대화 시작", use_container_width=True):
     st.session_state.messages = [{"role": "assistant", "content": "안녕하세요! Gitbook 문서에 대해 무엇이든 물어보세요."}]
     
     # 추천 질문 초기화 - 벡터 DB 기반 고급 추천 질문
-    st.session_state.suggested_questions = generate_advanced_initial_questions(vector_store, embeddings, qa_llm, num_questions=4)
+    try:
+        # 벡터 DB 기반 고급 추천 질문 생성 시도
+        st.session_state.suggested_questions = generate_advanced_initial_questions(vector_store, embeddings, supabase_client, qa_llm, num_questions=4)
+    except Exception as e:
+        print(f"새 대화 시작 시 고급 추천 질문 생성 실패: {e}")
+        try:
+            # 대체 방식 시도
+            st.session_state.suggested_questions = generate_alternative_questions(supabase_client, qa_llm, num_questions=4)
+        except Exception as backup_e:
+            print(f"새 대화 시작 시 대체 추천 질문 생성도 실패: {backup_e}")
+            # 마지막 대안으로 기본 질문 사용
+            st.session_state.suggested_questions = get_default_questions(4)
     
     st.rerun()
 
@@ -532,10 +623,6 @@ st.sidebar.markdown("---")
 st.sidebar.info(
     "이 챗봇은 FETA Gitbook 문서 내용을 기반으로 답변합니다."
 )
-
-# 채팅 기록 초기화
-if "messages" not in st.session_state:
-    st.session_state.messages = [{"role": "assistant", "content": "안녕하세요! Gitbook 문서에 대해 무엇이든 물어보세요."}]
 
 # 이전 채팅 기록 표시
 for message in st.session_state.messages:
@@ -645,7 +732,19 @@ if all_cols[0].button("모든 대화 지우기", use_container_width=True):
         except:
             pass
     # 추천 질문 초기화 - 벡터 DB 기반 고급 추천 질문
-    st.session_state.suggested_questions = generate_advanced_initial_questions(vector_store, embeddings, qa_llm, num_questions=4)
+    try:
+        # 벡터 DB 기반 고급 추천 질문 생성 시도
+        st.session_state.suggested_questions = generate_advanced_initial_questions(vector_store, embeddings, supabase_client, qa_llm, num_questions=4)
+    except Exception as e:
+        print(f"대화 지우기 시 고급 추천 질문 생성 실패: {e}")
+        try:
+            # 대체 방식 시도
+            st.session_state.suggested_questions = generate_alternative_questions(supabase_client, qa_llm, num_questions=4)
+        except Exception as backup_e:
+            print(f"대화 지우기 시 대체 추천 질문 생성도 실패: {backup_e}")
+            # 마지막 대안으로 기본 질문 사용
+            st.session_state.suggested_questions = get_default_questions(4)
+            
     st.rerun()
 
 # 현재 대화 저장 버튼
