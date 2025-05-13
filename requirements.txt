@@ -2,7 +2,8 @@ streamlit
 langchain
 langchain-openai
 langchain-community
-supabase-client
+aiohttp>=3.8.0  # supabase 의존성
+supabase>=1.0.0
 python-dotenv
 beautifulsoup4
 tiktoken
