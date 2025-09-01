@@ -64,6 +64,189 @@ streamlit run app.py
 - OpenAI 모델을 통한 답변 생성
 - 출처 문서 표시
 
+## 시스템 아키텍처
+
+### 전체 시스템 구조
+
+```mermaid
+graph TB
+    subgraph "External Services"
+        GB[Gitbook 문서]
+        OAI[OpenAI API]
+        SB[Supabase Vector DB]
+    end
+    
+    subgraph "Data Ingestion Layer"
+        IG[ingest_gitbook.py]
+        BS[BeautifulSoup Scraper]
+        TS[Text Splitter]
+        EMB[OpenAI Embeddings]
+    end
+    
+    subgraph "Application Layer"
+        APP[app.py - Streamlit UI]
+        QA[Q&A Chain]
+        MEM[Conversation Memory]
+        RET[Vector Retriever]
+    end
+    
+    subgraph "Storage Layer"
+        VDB[(Vector Database)]
+        CHAT[(Chat History)]
+    end
+    
+    GB --> IG
+    IG --> BS
+    BS --> TS
+    TS --> EMB
+    EMB --> OAI
+    EMB --> VDB
+    VDB --> SB
+    
+    APP --> QA
+    QA --> RET
+    RET --> VDB
+    QA --> OAI
+    QA --> MEM
+    MEM --> CHAT
+    
+    style GB fill:#e1f5fe
+    style OAI fill:#fff3e0
+    style SB fill:#e8f5e8
+    style APP fill:#f3e5f5
+```
+
+### 데이터 흐름 아키텍처
+
+```mermaid
+flowchart LR
+    subgraph "Data Sources"
+        A[Gitbook Pages]
+        B[Sitemap XML]
+    end
+    
+    subgraph "Processing Pipeline"
+        C[Web Scraping]
+        D[Content Extraction]
+        E[Text Chunking]
+        F[Embedding Generation]
+        G[Vector Storage]
+    end
+    
+    subgraph "Query Processing"
+        H[User Query]
+        I[Query Embedding]
+        J[Similarity Search]
+        K[Context Retrieval]
+        L[LLM Response]
+    end
+    
+    A --> C
+    B --> C
+    C --> D
+    D --> E
+    E --> F
+    F --> G
+    
+    H --> I
+    I --> J
+    J --> K
+    K --> L
+    G --> J
+    
+    style A fill:#e3f2fd
+    style H fill:#fff3e0
+    style L fill:#e8f5e8
+```
+
+## 시퀀스 다이어그램
+
+### 문서 수집 및 임베딩 프로세스
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant IngestScript as ingest_gitbook.py
+    participant Gitbook
+    participant OpenAI
+    participant Supabase
+    
+    User->>IngestScript: python ingest_gitbook.py 실행
+    IngestScript->>Gitbook: 사이트맵 XML 요청
+    Gitbook-->>IngestScript: URL 목록 반환
+    
+    loop 각 페이지별
+        IngestScript->>Gitbook: 페이지 내용 요청
+        Gitbook-->>IngestScript: HTML 내용 반환
+        IngestScript->>IngestScript: BeautifulSoup으로 텍스트 추출
+        IngestScript->>IngestScript: 텍스트 청킹 (1000자 단위)
+    end
+    
+    IngestScript->>OpenAI: 임베딩 생성 요청
+    OpenAI-->>IngestScript: 벡터 임베딩 반환
+    IngestScript->>Supabase: 문서 + 임베딩 저장
+    Supabase-->>IngestScript: 저장 완료 응답
+    IngestScript-->>User: 수집 완료 메시지
+```
+
+### 사용자 질의응답 프로세스
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Streamlit as app.py
+    participant Memory as Conversation Memory
+    participant Retriever as Vector Retriever
+    participant Supabase
+    participant OpenAI
+    
+    User->>Streamlit: 질문 입력
+    Streamlit->>Memory: 대화 기록 확인
+    Streamlit->>OpenAI: 질문 임베딩 생성
+    OpenAI-->>Streamlit: 질문 벡터 반환
+    
+    Streamlit->>Retriever: 유사 문서 검색 요청
+    Retriever->>Supabase: match_documents() 함수 호출
+    Supabase-->>Retriever: 관련 문서 청크 반환
+    Retriever-->>Streamlit: 컨텍스트 문서 반환
+    
+    Streamlit->>OpenAI: 질문 + 컨텍스트로 답변 생성 요청
+    OpenAI-->>Streamlit: 답변 텍스트 반환
+    
+    Streamlit->>Memory: 질문-답변 쌍 저장
+    Streamlit->>Streamlit: 추천 질문 생성
+    Streamlit-->>User: 답변 + 출처 + 추천 질문 표시
+```
+
+### 대화 히스토리 관리 프로세스
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Streamlit as app.py
+    participant FileSystem as chat_history.json
+    participant Memory as Session Memory
+    
+    User->>Streamlit: 앱 시작
+    Streamlit->>FileSystem: 기존 대화 히스토리 로드
+    FileSystem-->>Streamlit: 저장된 대화 목록 반환
+    
+    User->>Streamlit: 질문-답변 진행
+    Streamlit->>Memory: 세션 메모리에 저장
+    
+    alt 새 대화 시작
+        User->>Streamlit: "새 대화 시작" 클릭
+        Streamlit->>FileSystem: 현재 대화 저장
+        Streamlit->>Memory: 메모리 초기화
+        Streamlit-->>User: 새 대화 화면 표시
+    else 기존 대화 선택
+        User->>Streamlit: 저장된 대화 선택
+        Streamlit->>FileSystem: 선택된 대화 로드
+        Streamlit->>Memory: 메모리에 대화 복원
+        Streamlit-->>User: 선택된 대화 화면 표시
+    end
+```
+
 ## 파일 구조
 
 - `app.py`: Streamlit 웹 인터페이스
